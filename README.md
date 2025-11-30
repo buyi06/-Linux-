@@ -13,7 +13,7 @@
 # 🧠 Universal Optimize — Linux 通用安全网络优化脚本
 
 **作者**: @buyi06  
-**版本**: v1.0 Final  
+**版本**: v1.1
 **兼容系统**: Debian / Ubuntu / AlmaLinux / Rocky / CentOS / Arch / openSUSE / Alpine / KVM / 云主机  
 **目标**: "一键执行，全程安全、自动持久化、无副作用的网络性能优化脚本"
 
@@ -25,20 +25,27 @@
 |------|------|-------------|
 | 🔧 sysctl 优化 | 调整 TCP/UDP 缓冲、backlog、端口范围等 | ✅ |
 | 📦 ulimit 提升 | 调高文件句柄数、nproc 限制 | ✅ |
-| 🧩 网卡 offload 关闭 | 自动检测并安全关闭 GRO/GSO/TSO/LRO 等 | ✅ |
-| ⚙️ IRQ 优化 | 尝试将网卡中断绑定到 CPU0（虚拟机无 IRQ 会自动跳过） | ✅ |
-| 🩺 开机自检 | 每次启动自动输出状态日志（offload/IRQ/sysctl） | ✅ |
+| 🧩 网卡 offload 关闭 | 自动检测并安全关闭 GRO/GSO/TSO/LRO 等（非 systemd 环境也会即时尝试） | ✅ / ⏱️|
+| ⚙️ IRQ 优化 | 尝试将网卡中断绑定到 CPU0（虚拟机无 IRQ 会自动跳过；非 systemd 环境即时绑定） | ✅ / ⏱️|
+| 🩺 开机自检 | 每次启动自动输出状态日志（offload/IRQ/sysctl） | ✅（systemd）|
 | 🪶 安全 | 失败自动忽略、不锁机、不修改防火墙/代理配置 | ✅ |
 
 ---
 
 ## 🧰 一键使用
 
-推荐直接执行以下命令：
+需 root 权限，推荐直接执行以下命令：
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/buyi06/-Linux-/main/universal_optimize.sh)"
 ```
+
+---
+
+## 🏗️ 兼容性与运行要求
+
+- **root 权限**：需以 root 或 `sudo` 执行，否则脚本会直接提示退出。
+- **systemd 支持**：检测到 systemd 时会自动生成持久化服务（offload / IRQ 绑定 / 启动自检）。在 OpenVZ、alpine 容器等无 systemd 场景下，脚本会跳过服务部署，但仍即时关闭 offload / 绑定 IRQ，保持兼容性。
 
 ---
 

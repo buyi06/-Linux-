@@ -81,7 +81,7 @@ footer {
 <body>
 <header>
   <h1>⚙️ Universal Optimize</h1>
-  <p>Linux 一键系统性能优化脚本</p>
+  <p>Linux 一键系统性能优化脚本 · v1.1</p>
 </header>
 <main>
   <section>
@@ -89,10 +89,17 @@ footer {
     <table>
       <tr><th>模块</th><th>内容</th><th>效果</th></tr>
       <tr><td>内核网络优化</td><td>调整 TCP/UDP 缓冲、backlog、端口范围</td><td>🚀 提升吞吐、降低延迟</td></tr>
-      <tr><td>网卡层优化</td><td>自动关闭 GRO/GSO/TSO/LRO/SG</td><td>⚡ 降低 CPU 抖动与中断负担</td></tr>
+      <tr><td>网卡层优化</td><td>自动关闭 GRO/GSO/TSO/LRO/SG（非 systemd 亦会即时尝试）</td><td>⚡ 降低 CPU 抖动与中断负担</td></tr>
       <tr><td>系统资源优化</td><td>提升句柄限制、优化 swappiness</td><td>💪 支撑高并发连接</td></tr>
-      <tr><td>自检与修复</td><td>systemd 开机自检、自动修复</td><td>🔄 持续维持优化效果</td></tr>
+      <tr><td>自检与修复</td><td>systemd 开机自检、自动修复；无 systemd 环境仍可即时落地</td><td>🔄 持续维持优化效果</td></tr>
     </table>
+  </section>
+  <section>
+    <h2>🛡️ 兼容性</h2>
+    <ul>
+      <li>需要 root 或 <code>sudo</code> 权限执行，避免因权限不足导致配置缺失。</li>
+      <li>自动探测 systemd：存在 systemd 时部署持久化服务；无 systemd 时跳过服务部署但仍应用即时优化。</li>
+    </ul>
   </section>
   <section>
     <h2>🧩 一键执行（推荐）</h2>
