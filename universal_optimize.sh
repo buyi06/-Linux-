@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # universal_optimize.sh
-# 通用安全网络优化（UDP/TCP缓冲、关闭网卡offload、可选IRQ绑定、开机自检）
+# 通用安全网络优化（UDP/TCP缓冲、关闭网卡 offload、可选 IRQ 绑定、开机自检）
 # - 幂等可重复执行
 # - 失败默认忽略（不锁机、不卡网）
 # - 不修改应用/防火墙/代理配置
 set -Eeuo pipefail
+
+VERSION="1.1.0"
 
 ACTION="${1:-apply}"
 SYSCTL_FILE="/etc/sysctl.d/99-universal-net.conf"
@@ -15,11 +17,23 @@ OFFLOAD_UNIT="/etc/systemd/system/univ-offload@.service"
 IRQPIN_UNIT="/etc/systemd/system/univ-irqpin@.service"
 HEALTH_UNIT="/etc/systemd/system/univ-health.service"
 ENV_FILE="/etc/default/universal-optimize"
+HAS_SYSTEMD=0
+
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+  HAS_SYSTEMD=1
+fi
 
 #------------- helpers -------------
 ok(){   printf "\033[32m%s\033[0m\n" "$*"; }
 warn(){ printf "\033[33m%s\033[0m\n" "$*"; }
 err(){  printf "\033[31m%s\033[0m\n" "$*"; }
+
+require_root() {
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    err "[universal-optimize] 需要 root 权限，请使用 sudo 或切换 root 后再试"
+    exit 1
+  fi
+}
 
 detect_iface() {
   # IFACE 可由环境变量覆盖：IFACE=ens3 bash universal_optimize.sh apply
@@ -124,7 +138,8 @@ SVC
 apply_offload_unit() {
   local iface="$1"
   # systemd 模板单元：绑定网卡设备、等待链路UP、关闭常见 offload
-  cat >"$OFFLOAD_UNIT" <<'UNIT'
+  if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    cat >"$OFFLOAD_UNIT" <<'UNIT'
 [Unit]
 Description=Universal: disable NIC offloads for %i
 BindsTo=sys-subsystem-net-devices-%i.device
@@ -150,10 +165,13 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
-  systemctl enable "univ-offload@${iface}.service" >/dev/null 2>&1 || true
-  systemctl restart "univ-offload@${iface}.service" >/dev/null 2>&1 || true
-  ok "[universal-optimize] systemd 持久化 offload 关闭：univ-offload@${iface}.service"
+    systemctl daemon-reload || true
+    systemctl enable "univ-offload@${iface}.service" >/dev/null 2>&1 || true
+    systemctl restart "univ-offload@${iface}.service" >/dev/null 2>&1 || true
+    ok "[universal-optimize] systemd 持久化 offload 关闭：univ-offload@${iface}.service"
+  else
+    warn "[universal-optimize] 检测到非 systemd 环境，跳过 offload 持久化服务"
+  fi
 
   # 立即尝试一次（即便 systemd 未生效也尽量落地）
   if command -v ethtool >/dev/null 2>&1 || [[ -x /usr/sbin/ethtool ]]; then
@@ -162,10 +180,27 @@ UNIT
   fi
 }
 
+runtime_irqpin() {
+  local iface="$1"
+  local main_irq
+  main_irq=$(cat /sys/class/net/$iface/device/irq 2>/dev/null || true)
+  if [[ -n "$main_irq" && -w /proc/irq/$main_irq/smp_affinity ]]; then
+    echo 1 > /proc/irq/$main_irq/smp_affinity 2>/dev/null && echo "[irq] 主 IRQ $main_irq -> CPU0"
+  else
+    echo "[irq] 未发现主 IRQ（虚拟网卡常见，跳过）"
+  fi
+  for f in /sys/class/net/$iface/device/msi_irqs/*; do
+    [[ -f "$f" ]] || continue
+    irq=$(basename "$f")
+    echo 1 > /proc/irq/$irq/smp_affinity 2>/dev/null && echo "[irq] MSI IRQ $irq -> CPU0"
+  done
+}
+
 apply_irqpin_unit() {
   local iface="$1"
   # IRQ 绑定（KVM/virtio 多数没有主 IRQ / MSI，这里全程容错）
-  cat >"$IRQPIN_UNIT" <<'UNIT'
+  if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    cat >"$IRQPIN_UNIT" <<'UNIT'
 [Unit]
 Description=Universal: pin NIC IRQs of %i to CPU0 (safe)
 BindsTo=sys-subsystem-net-devices-%i.device
@@ -194,10 +229,15 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-  systemctl daemon-reload
-  systemctl enable "univ-irqpin@${iface}.service" >/dev/null 2>&1 || true
-  systemctl restart "univ-irqpin@${iface}.service" >/dev/null 2>&1 || true
-  ok "[universal-optimize] IRQ 绑定服务已配置（缺 IRQ 时自动跳过）"
+    systemctl daemon-reload || true
+    systemctl enable "univ-irqpin@${iface}.service" >/dev/null 2>&1 || true
+    systemctl restart "univ-irqpin@${iface}.service" >/dev/null 2>&1 || true
+    ok "[universal-optimize] IRQ 绑定服务已配置（缺 IRQ 时自动跳过）"
+  else
+    warn "[universal-optimize] 检测到非 systemd 环境，跳过 IRQ 持久化服务"
+  fi
+
+  runtime_irqpin "$iface"
 }
 
 apply_health_unit() {
@@ -207,7 +247,8 @@ IFACE="${IFACE}"
 SYSCTL_FILE="${SYSCTL_FILE}"
 EOF
 
-  cat >"$HEALTH_UNIT" <<'UNIT'
+  if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    cat >"$HEALTH_UNIT" <<'UNIT'
 [Unit]
 Description=Universal Optimize: boot health report
 After=network-online.target
@@ -231,8 +272,11 @@ ExecStart=/bin/bash -lc '
              net.ipv4.udp_rmem_min net.ipv4.udp_wmem_min 2>/dev/null | nl -ba || true
 '
 UNIT
-  systemctl daemon-reload
-  systemctl enable univ-health.service >/dev/null 2>&1 || true
+    systemctl daemon-reload || true
+    systemctl enable univ-health.service >/dev/null 2>&1 || true
+  else
+    warn "[universal-optimize] 检测到非 systemd 环境，跳过健康自检持久化"
+  fi
 }
 
 status_report() {
@@ -252,23 +296,33 @@ status_report() {
     warn "ethtool 不存在，无法显示 offload 细节"
   fi
   echo
-  systemctl is-enabled "univ-offload@${iface}.service" 2>/dev/null || true
-  systemctl is-active  "univ-offload@${iface}.service" 2>/dev/null || true
-  systemctl is-enabled "univ-irqpin@${iface}.service" 2>/dev/null || true
-  systemctl is-active  "univ-irqpin@${iface}.service" 2>/dev/null || true
+  if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    systemctl is-enabled "univ-offload@${iface}.service" 2>/dev/null || true
+    systemctl is-active  "univ-offload@${iface}.service" 2>/dev/null || true
+    systemctl is-enabled "univ-irqpin@${iface}.service" 2>/dev/null || true
+    systemctl is-active  "univ-irqpin@${iface}.service" 2>/dev/null || true
+  else
+    warn "systemd 不存在，跳过 systemd 服务状态检测"
+  fi
 }
 
 repair_missing() {
   # 只补缺，不动已有
   [[ -f "$SYSCTL_FILE" ]] || apply_sysctl
   [[ -f "$LIMITS_FILE" ]] || apply_limits
-  [[ -f "$OFFLOAD_UNIT" ]] || apply_offload_unit "$IFACE"
-  [[ -f "$IRQPIN_UNIT"  ]] || apply_irqpin_unit "$IFACE"
-  [[ -f "$HEALTH_UNIT"  ]] || apply_health_unit
+  if [[ $HAS_SYSTEMD -eq 1 ]]; then
+    [[ -f "$OFFLOAD_UNIT" ]] || apply_offload_unit "$IFACE"
+    [[ -f "$IRQPIN_UNIT"  ]] || apply_irqpin_unit "$IFACE"
+    [[ -f "$HEALTH_UNIT"  ]] || apply_health_unit
+  else
+    warn "[universal-optimize] 非 systemd 环境，仅执行即时优化"
+  fi
   ok "✅ 缺失项已自动补齐"
 }
 
 #------------- main -------------
+require_root
+
 IFACE="$(detect_iface || true)"
 if [[ -z "$IFACE" ]]; then
   err "[universal-optimize] 无法自动探测网卡，请用 IFACE=xxx 再试"
