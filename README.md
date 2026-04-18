@@ -2,7 +2,7 @@
   <img src="https://img.shields.io/badge/Linux-Extreme%20Optimize-red?style=for-the-badge&logo=linux" alt="Linux Extreme Optimize">
   <img src="https://img.shields.io/badge/BBR-已启用-brightgreen?style=for-the-badge" alt="BBR Enabled">
   <img src="https://img.shields.io/badge/TFO-已启用-brightgreen?style=for-the-badge" alt="TFO Enabled">
-  <img src="https://img.shields.io/badge/版本-2.0.0-blue?style=for-the-badge" alt="Version 2.0.0">
+  <img src="https://img.shields.io/badge/版本-2.0.1-blue?style=for-the-badge" alt="Version 2.0.1">
   <img src="https://img.shields.io/badge/许可证-MIT-lightgrey?style=for-the-badge" alt="License MIT">
 </p>
 
@@ -45,19 +45,28 @@
 
 ## ⚡ 快速开始
 
-### 一键安装（推荐）
+### 一键安装（推荐：pin 到已发布 tag 并校验 sha256）
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/buyi06/-Linux-/main/universal_optimize_extreme.sh)"
+# 1) 下载（固定 tag，而非 main，避免未来被篡改影响历史安装）
+curl -fsSLO https://raw.githubusercontent.com/buyi06/-Linux-/v2.0.1/universal_optimize_extreme.sh
+
+# 2) 校验 sha256（请替换为 Releases 页面公布的值）
+echo "<发布页公布的 sha256>  universal_optimize_extreme.sh" | sha256sum -c -
+
+# 3) 执行
+sudo bash universal_optimize_extreme.sh
 ```
 
-或者使用 `wget`：
+### 快捷方式（不做校验，仅测试环境使用）
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/buyi06/-Linux-/main/universal_optimize_extreme.sh | sudo bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/buyi06/-Linux-/v2.0.1/universal_optimize_extreme.sh)"
 ```
 
-> **提示**：脚本需要 `root` 或 `sudo` 权限执行。
+> ⚠️ **安全提示**：`curl | bash` 直连 `main` 分支（即上游任意新 commit）在生产环境是反模式。本项目推荐 pin 到 tag 并校验 sha256。
+> **权限提示**：脚本需要 `root` 或 `sudo` 执行。
+> **预演**：首次使用可加 `--dry-run` 查看将要写入的内容而不改动系统。
 
 ---
 
@@ -83,16 +92,16 @@ wget -qO- https://raw.githubusercontent.com/buyi06/-Linux-/main/universal_optimi
 
 ## 📈 性能提升
 
-在标准 **2 核 / 4GB 内存 / 1Gbps 带宽** 的 **Debian 12 VPS** 上测试：
+> ⚠️ **免责声明**：下列数字来自作者单机测试，**仅为示意值**，不构成任何性能承诺。实际效果强烈依赖硬件、网卡驱动、对端链路、拥塞状态、流量模型等因素，**个别场景可能出现负优化**。请在生产环境启用前先在测试机验证，并结合 `iperf3 / wrk / sockperf` 等工具建立你自己的基线。
 
-| 指标 | 优化前 | 优化后 | 提升幅度 |
+测试环境：**2 核 / 4GB 内存 / 1Gbps 带宽 / Debian 12 VPS**（作者单次测试）
+
+| 指标 | 优化前 | 优化后 | 变化 |
 |:---|:---|:---|:---|
-| **TCP 吞吐量** | ~650 Mbps | **~920 Mbps** | **+41%** |
-| **网络延迟 (RTT)** | 45 ms | **38 ms** | **-16%** |
-| **连接建立时间** | 3.2 ms | **1.8 ms** | **-44%** |
-| **最大并发连接** | ~10,000 | **>1,000,000** | **+100 倍** |
-
-*实际效果因硬件、网络环境和负载类型而异。*
+| TCP 吞吐量 | ~650 Mbps | ~920 Mbps | ↑ |
+| 网络延迟 (RTT) | 45 ms | 38 ms | ↓ |
+| 连接建立时间 | 3.2 ms | 1.8 ms | ↓ |
+| 最大并发连接 | ~10,000 | >1,000,000 | ↑ |
 
 ---
 
@@ -106,10 +115,19 @@ wget -qO- https://raw.githubusercontent.com/buyi06/-Linux-/main/universal_optimi
 |:---|:---|
 | `sudo bash universal_optimize_extreme.sh` | **默认**：应用所有优化 |
 | `sudo bash universal_optimize_extreme.sh apply` | 应用所有优化 |
+| `sudo bash universal_optimize_extreme.sh apply --dry-run` | 预演，不改动系统 |
 | `sudo bash universal_optimize_extreme.sh status` | 显示当前系统配置状态报告 |
 | `sudo bash universal_optimize_extreme.sh repair` | 检查并修复缺失的配置 |
 | `sudo bash universal_optimize_extreme.sh uninstall` | 完全卸载，恢复系统默认设置 |
 | `sudo bash universal_optimize_extreme.sh help` | 显示帮助信息 |
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|:---|:---|:---|
+| `IFACE` | 自动探测 | 手动指定网卡 |
+| `EXTREME_TFO` | `1` | TCP Fast Open：`0` 关闭 / `1` 仅客户端 / `3` 服务端+客户端（对老中间盒兼容性差，按需启用） |
+| `EXTREME_ECN` | `2` | 显式拥塞通知：`0` 关闭 / `1` 主动 / `2` 被动（推荐，避免部分老防火墙丢包） |
 
 ### 指定网卡
 
@@ -243,10 +261,11 @@ net.ipv4.tcp_congestion_control = bbr
 <details>
 <summary><b>2) TCP 快速打开 (TFO)</b></summary>
 
-允许在 TCP 握手的 SYN 包中携带数据，减少一个 RTT：
+允许在 TCP 握手的 SYN 包中携带数据，减少一个 RTT。**默认仅启用客户端方向（`=1`）**，因为服务端方向（`=3`）在部分运营商/CDN 中间盒中存在兼容性问题。如需服务端启用，请显式 `EXTREME_TFO=3`。
 
 ```ini
-net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_fastopen = 1    # 默认：仅客户端
+# net.ipv4.tcp_fastopen = 3  # 需要服务端 TFO 时显式开启
 ```
 
 </details>
@@ -373,6 +392,18 @@ tc qdisc add dev eth0 root fq
 <a id="changelog"></a>
 
 ## 📝 更新日志
+
+### v2.0.1 Extreme Edition
+
+- 🐛 修复 IRQ 亲和性掩码轮询 bug（CPU 数≥4 时分布错误甚至越界）
+- 🔒 TFO 默认改为 `1`（仅客户端），避免对老中间盒的兼容性问题；可用 `EXTREME_TFO=3` 覆盖
+- 🔒 ECN 默认改为 `2`（被动），可用 `EXTREME_ECN=1` 覆盖
+- 🔒 移除 `vm.overcommit_memory=1`、`vm.overcommit_ratio`、`kernel.panic_on_oops=1`、`kernel.shmmax/shmall` 等激进/非网络相关默认
+- 📈 `tcp_mem` / `udp_mem` 按内存分级，与缓冲区一致
+- 📝 `sysctl -p` 错误写入 `/var/log/extreme-optimize.log`，不再静默吞掉
+- 🆕 新增 `--dry-run` 预演模式
+- 🆕 启动时检测 OpenVZ / LXC / Docker 环境并提前警告
+- 📖 README 安装改为推荐 tag pin + sha256 校验；性能表加免责声明
 
 ### v2.0.0 Extreme Edition
 

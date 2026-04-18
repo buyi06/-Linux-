@@ -21,9 +21,18 @@
 
 set -Eeuo pipefail
 
-VERSION="2.0.0-extreme"
+VERSION="2.0.1-extreme"
 
-ACTION="${1:-apply}"
+# 解析参数：首个非 --dry-run 参数作为 ACTION
+DRY_RUN=0
+ACTION=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    *) [[ -z "$ACTION" ]] && ACTION="$arg" ;;
+  esac
+done
+ACTION="${ACTION:-apply}"
 SYSCTL_FILE="/etc/sysctl.d/99-extreme-optimize.conf"
 LIMITS_FILE="/etc/security/limits.d/99-extreme.conf"
 SYSTEMD_LIMITS_DIR="/etc/systemd/system.conf.d"
@@ -36,10 +45,29 @@ ENV_FILE="/etc/default/extreme-optimize"
 HAS_SYSTEMD=0
 TOTAL_MEM_KB=0
 TOTAL_MEM_MB=0
+IS_OPENVZ=0
+IS_LXC=0
 
 if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
   HAS_SYSTEMD=1
 fi
+
+detect_virt() {
+  if [[ -f /proc/user_beancounters && ! -d /proc/vz/version ]] || [[ -f /proc/vz/veinfo ]]; then
+    IS_OPENVZ=1
+  fi
+  if grep -qaE '(lxc|container=lxc)' /proc/1/environ 2>/dev/null \
+     || [[ -f /.dockerenv ]] \
+     || grep -qE ':/(docker|lxc)/' /proc/1/cgroup 2>/dev/null; then
+    IS_LXC=1
+  fi
+  if [[ $IS_OPENVZ -eq 1 ]]; then
+    warn "检测到 OpenVZ 容器：内核参数多数不可修改，脚本将尽力而为，但多数优化不会生效"
+  fi
+  if [[ $IS_LXC -eq 1 ]]; then
+    warn "检测到 LXC/Docker 容器：部分参数依赖宿主机内核，当前环境可能无效"
+  fi
+}
 
 #------------- helpers -------------
 ok(){   printf "\033[32m[✓] %s\033[0m\n" "$*"; }
@@ -156,6 +184,8 @@ calculate_buffer_sizes() {
     UDP_WMEM_MIN=8192
     NETDEV_BACKLOG=10000
     SOMAXCONN=4096
+    TCP_MEM="21845 43690 87380"
+    UDP_MEM="21845 43690 87380"
     info "小内存模式 (<2GB): 使用保守缓冲区设置"
   elif [[ $TOTAL_MEM_MB -lt 8192 ]]; then
     # 中等内存: 标准设置
@@ -169,6 +199,8 @@ calculate_buffer_sizes() {
     UDP_WMEM_MIN=131072
     NETDEV_BACKLOG=50000
     SOMAXCONN=16384
+    TCP_MEM="65536 131072 262144"
+    UDP_MEM="65536 131072 262144"
     info "标准内存模式 (2-8GB): 使用标准缓冲区设置"
   else
     # 大内存: 激进设置
@@ -182,13 +214,15 @@ calculate_buffer_sizes() {
     UDP_WMEM_MIN=262144
     NETDEV_BACKLOG=100000
     SOMAXCONN=65535
+    TCP_MEM="262144 524288 1048576"
+    UDP_MEM="262144 524288 1048576"
     info "大内存模式 (>8GB): 使用激进缓冲区设置"
   fi
 }
 
 apply_sysctl() {
   info "正在应用极限网络优化参数..."
-  
+
   # 检查 BBR 支持
   local use_bbr=0
   if check_bbr_support; then
@@ -197,9 +231,20 @@ apply_sysctl() {
   else
     warn "BBR 不可用，将使用 cubic"
   fi
-  
+
+  # TFO / ECN 可由环境变量覆盖
+  local TFO_VAL="${EXTREME_TFO:-1}"
+  local ECN_VAL="${EXTREME_ECN:-2}"
+  case "$TFO_VAL" in 0|1|2|3) ;; *) warn "EXTREME_TFO=$TFO_VAL 非法，回退为 1"; TFO_VAL=1 ;; esac
+  case "$ECN_VAL" in 0|1|2) ;; *) warn "EXTREME_ECN=$ECN_VAL 非法，回退为 2"; ECN_VAL=2 ;; esac
+
   # 计算动态缓冲区大小
   calculate_buffer_sizes
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将写入 $SYSCTL_FILE (TFO=$TFO_VAL ECN=$ECN_VAL BBR=$use_bbr) — 跳过实际写入"
+    return 0
+  fi
   
   # 生成配置文件
   cat >"$SYSCTL_FILE" <<EOF
@@ -233,8 +278,8 @@ net.core.somaxconn = ${SOMAXCONN}
 net.ipv4.tcp_rmem = ${TCP_RMEM}
 net.ipv4.tcp_wmem = ${TCP_WMEM}
 
-# TCP 内存管理 (pages)
-net.ipv4.tcp_mem = 65536 131072 262144
+# TCP 内存管理 (pages，根据内存动态调整)
+net.ipv4.tcp_mem = ${TCP_MEM}
 
 # SYN 队列长度
 net.ipv4.tcp_max_syn_backlog = 65535
@@ -244,8 +289,9 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_max_tw_buckets = 2000000
 
-# TCP 快速打开 (TFO) - 减少连接延迟
-net.ipv4.tcp_fastopen = 3
+# TCP 快速打开 (TFO) - 默认仅客户端 (1)，生产服务端如需 3 请显式设置 EXTREME_TFO=3
+# 某些运营商中间盒对 TFO 服务端位兼容性较差，保守默认为 1
+net.ipv4.tcp_fastopen = ${TFO_VAL}
 
 # TCP keepalive 优化
 net.ipv4.tcp_keepalive_time = 600
@@ -274,15 +320,16 @@ net.ipv4.tcp_synack_retries = 3
 # 孤儿连接限制
 net.ipv4.tcp_max_orphans = 262144
 
-# 启用 ECN (显式拥塞通知)
-net.ipv4.tcp_ecn = 1
+# 启用 ECN (显式拥塞通知) - 默认 2 (被动响应)，老中间盒可能丢弃 ECT 流量
+# 激进场景可设 EXTREME_ECN=1
+net.ipv4.tcp_ecn = ${ECN_VAL}
 
 # TCP 无延迟确认 (减少延迟)
 net.ipv4.tcp_no_metrics_save = 1
 
 # ==================== UDP 优化 ====================
-# UDP 内存管理 (pages)
-net.ipv4.udp_mem = 65536 131072 262144
+# UDP 内存管理 (pages，根据内存动态调整)
+net.ipv4.udp_mem = ${UDP_MEM}
 net.ipv4.udp_rmem_min = ${UDP_RMEM_MIN}
 net.ipv4.udp_wmem_min = ${UDP_WMEM_MIN}
 
@@ -334,9 +381,8 @@ vm.dirty_writeback_centisecs = 500
 # VFS 缓存压力
 vm.vfs_cache_pressure = 50
 
-# 内存过量提交策略
-vm.overcommit_memory = 1
-vm.overcommit_ratio = 50
+# 注意: vm.overcommit_memory 不在本脚本调整，保留内核默认 (0)
+# 对数据库/OOM 敏感型服务，设 =1 会显著改变分配语义，故不隐式启用
 
 # 最小空闲内存 (KB)
 vm.min_free_kbytes = 65536
@@ -352,9 +398,8 @@ fs.inotify.max_user_instances = 8192
 fs.inotify.max_queued_events = 32768
 
 # ==================== 内核优化 ====================
-# 内核 panic 后自动重启
+# 内核 panic 后自动重启 (不启用 panic_on_oops，保留 oops 现场便于排障)
 kernel.panic = 10
-kernel.panic_on_oops = 1
 
 # 进程 ID 最大值
 kernel.pid_max = 4194304
@@ -363,9 +408,8 @@ kernel.pid_max = 4194304
 kernel.msgmnb = 65536
 kernel.msgmax = 65536
 
-# 共享内存限制
-kernel.shmmax = $((TOTAL_MEM_KB * 1024 / 2))
-kernel.shmall = $((TOTAL_MEM_KB / 4))
+# 注意: kernel.shmmax / kernel.shmall 不在本脚本调整
+# 这类参数与数据库 (Postgres/Oracle) 配置强相关，应由 DBA 按应用需要设置
 
 # ==================== IPv6 优化 (可选) ====================
 # 如果不使用 IPv6，可以禁用以提高性能
@@ -403,20 +447,35 @@ EOF
 
   # 运行态注入
   info "正在应用 sysctl 参数到运行态..."
-  
+
   # 加载 conntrack 模块 (如果需要)
   modprobe nf_conntrack 2>/dev/null || true
   modprobe nf_conntrack_ipv4 2>/dev/null || true
-  
-  # 应用配置
-  sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
-  
+
+  # 应用配置，失败行写入日志便于排障
+  local log=/var/log/extreme-optimize.log
+  mkdir -p /var/log 2>/dev/null || true
+  {
+    echo "=== sysctl apply $(date '+%F %T') ==="
+    sysctl -p "$SYSCTL_FILE"
+  } >>"$log" 2>&1 || true
+  local fail_count
+  fail_count=$(grep -c 'cannot stat\|No such file\|Invalid argument\|permission denied' "$log" 2>/dev/null | tail -1 || echo 0)
+  if [[ "${fail_count:-0}" -gt 0 ]]; then
+    warn "部分 sysctl 参数未生效 (可能系统不支持)，详见 $log"
+  fi
+
   ok "sysctl 极限优化已应用并持久化: $SYSCTL_FILE"
 }
 
 apply_limits() {
   info "正在提升系统资源限制..."
-  
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将写入 $LIMITS_FILE 与 $SYSTEMD_LIMITS_FILE — 跳过"
+    return 0
+  fi
+
   mkdir -p "$(dirname "$LIMITS_FILE")"
   cat >"$LIMITS_FILE" <<'LIM'
 # Extreme Optimize: 文件句柄和进程限制
@@ -448,9 +507,14 @@ SVC
 
 apply_offload_unit() {
   local iface="$1"
-  
+
   info "正在配置网卡 offload 关闭服务..."
-  
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将创建 $OFFLOAD_UNIT 并对 $iface 关闭 offload — 跳过"
+    return 0
+  fi
+
   if [[ $HAS_SYSTEMD -eq 1 ]]; then
     cat >"$OFFLOAD_UNIT" <<'UNIT'
 [Unit]
@@ -521,9 +585,14 @@ UNIT
 
 apply_qdisc_unit() {
   local iface="$1"
-  
+
   info "正在配置队列调度优化..."
-  
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将创建 $QDISC_UNIT 并对 $iface 应用 fq — 跳过"
+    return 0
+  fi
+
   if [[ $HAS_SYSTEMD -eq 1 ]]; then
     cat >"$QDISC_UNIT" <<'UNIT'
 [Unit]
@@ -589,21 +658,19 @@ runtime_irqpin() {
       info "主 IRQ $main_irq -> CPU0"
   fi
   
-  # MSI IRQ 分布到多个 CPU
-  local cpu_mask=1
+  # MSI IRQ 轮询分布到各 CPU (每个 IRQ 固定到单个 CPU)
   local irq_count=0
+  local idx=0
   for f in /sys/class/net/$iface/device/msi_irqs/*; do
     [[ -f "$f" ]] || continue
     local irq
     irq=$(basename "$f")
     if [[ -w /proc/irq/$irq/smp_affinity ]]; then
-      echo $cpu_mask > /proc/irq/$irq/smp_affinity 2>/dev/null && \
-        info "MSI IRQ $irq -> CPU mask $cpu_mask"
+      local cpu_mask=$(( 1 << (idx % cpu_count) ))
+      printf '%x\n' "$cpu_mask" > /proc/irq/$irq/smp_affinity 2>/dev/null && \
+        info "MSI IRQ $irq -> CPU$((idx % cpu_count)) (mask 0x$(printf '%x' $cpu_mask))"
       ((irq_count++))
-      # 轮换 CPU
-      if [[ $cpu_count -gt 1 ]]; then
-        cpu_mask=$(( (cpu_mask << 1) % ((1 << cpu_count) - 1) + 1 ))
-      fi
+      ((idx++))
     fi
   done
   
@@ -614,7 +681,12 @@ runtime_irqpin() {
 
 apply_irqpin_unit() {
   local iface="$1"
-  
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将创建 $IRQPIN_UNIT 并绑定 $iface IRQ — 跳过"
+    return 0
+  fi
+
   if [[ $HAS_SYSTEMD -eq 1 ]]; then
     cat >"$IRQPIN_UNIT" <<'UNIT'
 [Unit]
@@ -634,16 +706,15 @@ ExecStart=-/bin/bash -lc '
     echo 1 > /proc/irq/$main_irq/smp_affinity 2>/dev/null && \
       echo "[irq] 主 IRQ $main_irq -> CPU0"
   fi
-  
-  cpu_mask=1
+
+  idx=0
   for f in /sys/class/net/$IF/device/msi_irqs/*; do
     [[ -f "$f" ]] || continue
     irq=$(basename "$f")
     if [[ -w /proc/irq/$irq/smp_affinity ]]; then
-      echo $cpu_mask > /proc/irq/$irq/smp_affinity 2>/dev/null
-      if [[ $CPU_COUNT -gt 1 ]]; then
-        cpu_mask=$(( (cpu_mask << 1) % ((1 << CPU_COUNT) - 1) + 1 ))
-      fi
+      cpu_mask=$(( 1 << (idx % CPU_COUNT) ))
+      printf "%x\n" "$cpu_mask" > /proc/irq/$irq/smp_affinity 2>/dev/null
+      idx=$((idx + 1))
     fi
   done
   exit 0
@@ -665,6 +736,11 @@ UNIT
 }
 
 apply_health_unit() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "[dry-run] 将创建 $HEALTH_UNIT 与 $ENV_FILE — 跳过"
+    return 0
+  fi
+
   cat >"$ENV_FILE" <<EOF
 IFACE="${IFACE}"
 SYSCTL_FILE="${SYSCTL_FILE}"
@@ -933,7 +1009,7 @@ show_help() {
 ║     Extreme Linux Network & System Optimizer v${VERSION}        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-用法: bash $0 [命令]
+用法: bash $0 [命令] [--dry-run]
 
 命令:
   apply     应用所有优化 (默认)
@@ -942,13 +1018,20 @@ show_help() {
   uninstall 完全卸载优化
   help      显示此帮助
 
+选项:
+  --dry-run, -n   预演模式，不写入任何文件/执行服务操作
+
 环境变量:
-  IFACE=xxx   手动指定网卡 (默认自动检测)
+  IFACE=xxx          手动指定网卡 (默认自动检测)
+  EXTREME_TFO=0|1|3  TCP Fast Open (默认 1 = 仅客户端；3 = 服务端+客户端)
+  EXTREME_ECN=0|1|2  显式拥塞通知 (默认 2 = 被动；1 = 主动可能被老中间盒丢弃)
 
 示例:
-  bash $0                    # 应用所有优化
-  bash $0 status             # 查看状态
-  IFACE=ens3 bash $0 apply   # 指定网卡
+  bash $0                      # 应用所有优化
+  bash $0 status               # 查看状态
+  bash $0 apply --dry-run      # 预演，不改动系统
+  IFACE=ens3 bash $0 apply     # 指定网卡
+  EXTREME_TFO=3 bash $0 apply  # 显式启用服务端 TFO
 
 一键安装:
   bash -c "\$(curl -fsSL URL)"
@@ -959,6 +1042,7 @@ EOF
 #------------- main -------------
 require_root
 detect_mem
+detect_virt
 
 IFACE="$(detect_iface || true)"
 if [[ -z "$IFACE" ]]; then

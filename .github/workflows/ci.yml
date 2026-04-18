@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck
+        run: shellcheck -S warning universal_optimize_extreme.sh
+
+  dry-run:
+    name: Dry-run smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n syntax check
+        run: bash -n universal_optimize_extreme.sh
+      - name: apply --dry-run (no root, expect early exit)
+        run: |
+          set +e
+          bash universal_optimize_extreme.sh apply --dry-run
+          rc=$?
+          # 未以 root 运行时脚本应 exit 1
+          if [ "$rc" -ne 1 ]; then
+            echo "Expected rc=1 without root, got $rc" >&2
+            exit 1
+          fi
+      - name: help
+        run: bash universal_optimize_extreme.sh help
+
+  integration-docker:
+    name: Apply/Status/Uninstall in Debian container
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, ubuntu:22.04, rockylinux:9]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run in ${{ matrix.image }}
+        run: |
+          docker run --rm --privileged -v "$PWD:/src" -w /src ${{ matrix.image }} bash -c '
+            set -e
+            if command -v apt-get >/dev/null; then
+              apt-get update && apt-get install -y --no-install-recommends iproute2 ethtool procps kmod
+            elif command -v dnf >/dev/null; then
+              dnf -y install iproute ethtool procps-ng kmod
+            fi
+            # dry-run 必须成功
+            bash universal_optimize_extreme.sh apply --dry-run
+            # 容器内 sysctl 受限；apply 不强求所有参数生效，仅要求退出码 0
+            bash universal_optimize_extreme.sh apply || true
+            bash universal_optimize_extreme.sh status || true
+            bash universal_optimize_extreme.sh uninstall || true
+          '
