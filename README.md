@@ -36,7 +36,7 @@
 > **定位**：面向 VPS/云主机/物理机的「一键式」系统与网络栈调优，兼顾可逆与幂等，适合持续运行在生产环境。
 
 - **作者**：[@buyi06](https://github.com/buyi06)  
-- **版本**：v2.0.0 Extreme Edition  
+- **版本**：v2.0.1 Extreme Edition  
 - **许可证**：MIT License
 
 ---

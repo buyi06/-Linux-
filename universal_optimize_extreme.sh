@@ -16,12 +16,22 @@
 # - 队列调度优化 (fq/fq_codel)
 #
 # 作者: 基于 buyi06 原版优化
-# 版本: 2.0.0 Extreme Edition
+# 版本: 2.0.1 Extreme Edition
 # 兼容: Debian / Ubuntu / CentOS / Rocky / Alma / Arch / Alpine / openSUSE
 
 set -Eeuo pipefail
 
 VERSION="2.0.1-extreme"
+
+# 统一错误处理：捕获未预期错误行号与退出码，给出可排查的提示
+_err_trap() {
+  local rc=$?
+  local lineno=${1:-?}
+  printf '\033[31m[FATAL]\033[0m 第一个不成功的命令在行 %s (退出码 %s)\n' "$lineno" "$rc" >&2
+  printf '           详情可查看 /var/log/extreme-optimize.log\n' >&2
+  exit "$rc"
+}
+trap '_err_trap $LINENO' ERR
 
 # 解析参数：首个非 --dry-run 参数作为 ACTION
 DRY_RUN=0
@@ -148,17 +158,17 @@ pkg_install() {
     # Debian/Ubuntu
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1 || true
-    [[ $need_ethtool -eq 1 ]] && apt-get install -y ethtool >/dev/null 2>&1 || true
-    [[ $need_iproute -eq 1 ]] && apt-get install -y iproute2 >/dev/null 2>&1 || true
+    if [[ $need_ethtool -eq 1 ]]; then apt-get install -y ethtool >/dev/null 2>&1 || true; fi
+    if [[ $need_iproute -eq 1 ]]; then apt-get install -y iproute2 >/dev/null 2>&1 || true; fi
   elif command -v dnf >/dev/null 2>&1; then
-    [[ $need_ethtool -eq 1 ]] && dnf -y install ethtool >/dev/null 2>&1 || true
-    [[ $need_iproute -eq 1 ]] && dnf -y install iproute >/dev/null 2>&1 || true
+    if [[ $need_ethtool -eq 1 ]]; then dnf -y install ethtool >/dev/null 2>&1 || true; fi
+    if [[ $need_iproute -eq 1 ]]; then dnf -y install iproute >/dev/null 2>&1 || true; fi
   elif command -v yum >/dev/null 2>&1; then
-    [[ $need_ethtool -eq 1 ]] && yum -y install ethtool >/dev/null 2>&1 || true
-    [[ $need_iproute -eq 1 ]] && yum -y install iproute >/dev/null 2>&1 || true
+    if [[ $need_ethtool -eq 1 ]]; then yum -y install ethtool >/dev/null 2>&1 || true; fi
+    if [[ $need_iproute -eq 1 ]]; then yum -y install iproute >/dev/null 2>&1 || true; fi
   elif command -v zypper >/dev/null 2>&1; then
-    [[ $need_ethtool -eq 1 ]] && zypper --non-interactive install ethtool >/dev/null 2>&1 || true
-    [[ $need_iproute -eq 1 ]] && zypper --non-interactive install iproute2 >/dev/null 2>&1 || true
+    if [[ $need_ethtool -eq 1 ]]; then zypper --non-interactive install ethtool >/dev/null 2>&1 || true; fi
+    if [[ $need_iproute -eq 1 ]]; then zypper --non-interactive install iproute2 >/dev/null 2>&1 || true; fi
   elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm ethtool iproute2 >/dev/null 2>&1 || true
   elif command -v apk >/dev/null 2>&1; then
@@ -186,6 +196,7 @@ calculate_buffer_sizes() {
     SOMAXCONN=4096
     TCP_MEM="21845 43690 87380"
     UDP_MEM="21845 43690 87380"
+    CONNTRACK_MAX=262144
     info "小内存模式 (<2GB): 使用保守缓冲区设置"
   elif [[ $TOTAL_MEM_MB -lt 8192 ]]; then
     # 中等内存: 标准设置
@@ -201,6 +212,7 @@ calculate_buffer_sizes() {
     SOMAXCONN=16384
     TCP_MEM="65536 131072 262144"
     UDP_MEM="65536 131072 262144"
+    CONNTRACK_MAX=1048576
     info "标准内存模式 (2-8GB): 使用标准缓冲区设置"
   else
     # 大内存: 激进设置
@@ -216,6 +228,7 @@ calculate_buffer_sizes() {
     SOMAXCONN=65535
     TCP_MEM="262144 524288 1048576"
     UDP_MEM="262144 524288 1048576"
+    CONNTRACK_MAX=2097152
     info "大内存模式 (>8GB): 使用激进缓冲区设置"
   fi
 }
@@ -311,7 +324,7 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_dsack = 1
-net.ipv4.tcp_fack = 1
+# tcp_fack 在内核 4.15+ 已移除，设置会触发 "unknown key" 警告，故不再写入。
 
 # SYN 重试次数 (减少等待时间)
 net.ipv4.tcp_syn_retries = 3
@@ -338,8 +351,8 @@ net.ipv4.ip_local_port_range = 1024 65535
 
 # ==================== 连接跟踪优化 ====================
 # 增大连接跟踪表 (高并发必须)
-net.netfilter.nf_conntrack_max = 2097152
-net.nf_conntrack_max = 2097152
+net.netfilter.nf_conntrack_max = ${CONNTRACK_MAX}
+net.nf_conntrack_max = ${CONNTRACK_MAX}
 
 # 连接跟踪超时优化
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
@@ -431,8 +444,10 @@ net.ipv4.neigh.default.gc_thresh3 = 65536
 net.ipv4.tcp_syncookies = 1
 
 # 反向路径过滤
-net.ipv4.conf.all.rp_filter = 1
-net.ipv4.conf.default.rp_filter = 1
+# 使用松模式 (2)，避免不对称路由场景下合法流量被丢弃
+# 如需严格模式，部署后手动 sysctl -w net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
 
 # 禁用 ICMP 重定向
 net.ipv4.conf.all.accept_redirects = 0
@@ -455,14 +470,20 @@ EOF
   # 应用配置，失败行写入日志便于排障
   local log=/var/log/extreme-optimize.log
   mkdir -p /var/log 2>/dev/null || true
+  # 先抓本次 sysctl 输出到临时文件，仅统计本次失败行，避免跨次累积计数
+  local tmp_apply
+  tmp_apply=$(mktemp) || tmp_apply=/tmp/extreme-sysctl-apply.$$
   {
     echo "=== sysctl apply $(date '+%F %T') ==="
     sysctl -p "$SYSCTL_FILE"
-  } >>"$log" 2>&1 || true
+  } >"$tmp_apply" 2>&1 || true
+  # 追加到历史日志
+  cat "$tmp_apply" >>"$log" 2>/dev/null || true
   local fail_count
-  fail_count=$(grep -c 'cannot stat\|No such file\|Invalid argument\|permission denied' "$log" 2>/dev/null | tail -1 || echo 0)
+  fail_count=$(grep -cE 'cannot stat|No such file|Invalid argument|permission denied|unknown key' "$tmp_apply" 2>/dev/null || echo 0)
+  rm -f "$tmp_apply" 2>/dev/null || true
   if [[ "${fail_count:-0}" -gt 0 ]]; then
-    warn "部分 sysctl 参数未生效 (可能系统不支持)，详见 $log"
+    warn "部分 sysctl 参数未生效（共 ${fail_count} 行），详见 $log"
   fi
 
   ok "sysctl 极限优化已应用并持久化: $SYSCTL_FILE"
@@ -501,6 +522,11 @@ DefaultLimitNPROC=infinity
 DefaultLimitMEMLOCK=infinity
 DefaultLimitSTACK=infinity
 SVC
+
+  # 重新执行 systemd manager 以让 DefaultLimit* 对后续启动的服务生效
+  if [[ $HAS_SYSTEMD -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reexec 2>/dev/null || true
+  fi
 
   ok "ulimit 资源限制已提升 (新会话/服务生效)"
 }
@@ -650,25 +676,25 @@ runtime_irqpin() {
   
   # 获取主 IRQ
   local main_irq
-  main_irq=$(cat /sys/class/net/$iface/device/irq 2>/dev/null || true)
+  main_irq=$(cat "/sys/class/net/$iface/device/irq" 2>/dev/null || true)
   
   if [[ -n "$main_irq" && -w /proc/irq/$main_irq/smp_affinity ]]; then
     # 绑定到 CPU0
-    echo 1 > /proc/irq/$main_irq/smp_affinity 2>/dev/null && \
+    echo 1 > "/proc/irq/$main_irq/smp_affinity" 2>/dev/null && \
       info "主 IRQ $main_irq -> CPU0"
   fi
   
   # MSI IRQ 轮询分布到各 CPU (每个 IRQ 固定到单个 CPU)
   local irq_count=0
   local idx=0
-  for f in /sys/class/net/$iface/device/msi_irqs/*; do
+  for f in "/sys/class/net/$iface/device/msi_irqs/"*; do
     [[ -f "$f" ]] || continue
     local irq
     irq=$(basename "$f")
     if [[ -w /proc/irq/$irq/smp_affinity ]]; then
       local cpu_mask=$(( 1 << (idx % cpu_count) ))
-      printf '%x\n' "$cpu_mask" > /proc/irq/$irq/smp_affinity 2>/dev/null && \
-        info "MSI IRQ $irq -> CPU$((idx % cpu_count)) (mask 0x$(printf '%x' $cpu_mask))"
+      printf '%x\n' "$cpu_mask" > "/proc/irq/$irq/smp_affinity" 2>/dev/null && \
+        info "MSI IRQ $irq -> CPU$((idx % cpu_count)) (mask 0x$(printf '%x' "$cpu_mask"))"
       ((irq_count++))
       ((idx++))
     fi
@@ -892,7 +918,7 @@ status_report() {
     local offload_info
     offload_info=$($ET -k "$iface" 2>/dev/null | grep -E '(gro|gso|tso|lro|scatter-gather):' | head -10)
     if [[ -n "$offload_info" ]]; then
-      echo "$offload_info" | while read line; do
+      echo "$offload_info" | while IFS= read -r line; do
         echo "  $line"
       done
     else
@@ -1025,6 +1051,7 @@ show_help() {
   IFACE=xxx          手动指定网卡 (默认自动检测)
   EXTREME_TFO=0|1|3  TCP Fast Open (默认 1 = 仅客户端；3 = 服务端+客户端)
   EXTREME_ECN=0|1|2  显式拥塞通知 (默认 2 = 被动；1 = 主动可能被老中间盒丢弃)
+  EXTREME_OFFLOAD=0  强制关闭网卡 offload（默认不关闭，延续原内核默认）
 
 示例:
   bash $0                      # 应用所有优化
@@ -1064,7 +1091,13 @@ case "$ACTION" in
     pkg_install
     apply_sysctl
     apply_limits
-    apply_offload_unit "$IFACE"
+    # NIC offload 默认保留，大多数物理/虚拟网卡关闭 offload 会显著降低吞吐。
+    # 如确需关闭（特定封装/高 PPS 场景），设置 EXTREME_OFFLOAD=0。
+    if [[ "${EXTREME_OFFLOAD:-1}" == "0" ]]; then
+      apply_offload_unit "$IFACE"
+    else
+      info "保留网卡 offload（推荐）。如需关闭，设置 EXTREME_OFFLOAD=0 bash $0 apply"
+    fi
     apply_qdisc_unit "$IFACE"
     apply_irqpin_unit "$IFACE"
     apply_health_unit
