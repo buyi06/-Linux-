@@ -5,7 +5,7 @@
   <img src="https://img.shields.io/badge/版本-2.0.1-blue?style=for-the-badge" alt="Version 2.0.1">
   <img src="https://img.shields.io/badge/许可证-MIT-lightgrey?style=for-the-badge" alt="License MIT">
 </p>
-https://vsllm.com
+
 
 <h1 align="center">🔥 Linux 极限网络优化脚本</h1>
 
